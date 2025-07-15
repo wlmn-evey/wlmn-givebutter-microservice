@@ -1,0 +1,75 @@
+name: Deploy to Google Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: wlmn-site-main
+  SERVICE_NAME: simple-givebutter-service
+  REGION: us-central1
+  
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Google Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        version: 'latest'
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+    - name: Configure Docker for Google Cloud
+      run: |
+        gcloud auth configure-docker gcr.io
+
+    - name: Build container image
+      run: |
+        docker build -t gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA .
+        docker tag gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA gcr.io/$PROJECT_ID/$SERVICE_NAME:latest
+
+    - name: Push container image
+      run: |
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA
+        docker push gcr.io/$PROJECT_ID/$SERVICE_NAME:latest
+
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy $SERVICE_NAME \
+          --image gcr.io/$PROJECT_ID/$SERVICE_NAME:$GITHUB_SHA \
+          --region $REGION \
+          --platform managed \
+          --no-allow-unauthenticated \
+          --service-account wlmn-givebutter-backend@$PROJECT_ID.iam.gserviceaccount.com \
+          --set-env-vars PROJECT_ID=$PROJECT_ID,STORAGE_BUCKET=wlmn-site-main-assets,ENVIRONMENT=production \
+          --set-secrets GIVEBUTTER_API_KEY=givebutter-api-key:latest \
+          --memory 512Mi \
+          --cpu 1 \
+          --timeout 300 \
+          --concurrency 100 \
+          --max-instances 10
+
+    - name: Make service accessible to authenticated users
+      run: |
+        gcloud run services add-iam-policy-binding $SERVICE_NAME \
+          --region=$REGION \
+          --member="serviceAccount:wlmn-backend@$PROJECT_ID.iam.gserviceaccount.com" \
+          --role="roles/run.invoker"
+
+    - name: Get service URL
+      run: |
+        echo "Service deployed to:"
+        gcloud run services describe $SERVICE_NAME --region $REGION --format 'value(status.url)'
