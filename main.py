@@ -485,14 +485,15 @@ async def get_donor_data(
         transactions = transactions_data.get('data', []) if transactions_data else []
         plans = plans_data.get('data', []) if plans_data else []
         
-        # Create lookup for active recurring plans by contact_id
-        active_plans_by_contact = {}
+        # Create lookup for active recurring plans by email
+        # The Givebutter plans API returns email directly on the plan, not contact_id
+        active_plans_by_email = {}
         for plan in plans:
-            if plan.get('status') == 'active' and plan.get('contact_id'):
-                contact_id = str(plan['contact_id'])
-                if contact_id not in active_plans_by_contact:
-                    active_plans_by_contact[contact_id] = []
-                active_plans_by_contact[contact_id].append(plan)
+            if plan.get('status') == 'active' and plan.get('email'):
+                email = plan['email'].lower()
+                if email not in active_plans_by_email:
+                    active_plans_by_email[email] = []
+                active_plans_by_email[email].append(plan)
         
         # Create transaction lookup by contact_id
         contact_transactions = {}
@@ -507,26 +508,42 @@ async def get_donor_data(
         enriched_contacts = []
         for contact in contacts:
             contact_id = str(contact.get('id'))
+            contact_email = contact.get('primary_email', '').lower() if contact.get('primary_email') else None
             contact_txns = contact_transactions.get(contact_id, [])
-            contact_plans = active_plans_by_contact.get(contact_id, [])
+            
+            # Look up plans by email
+            contact_plans = []
+            if contact_email and contact_email in active_plans_by_email:
+                contact_plans = active_plans_by_email[contact_email]
+            
+            # Use Givebutter's own stats if available
+            givebutter_stats = contact.get('stats', {})
+            has_givebutter_recurring = givebutter_stats.get('recurring_contributions', 0) > 0
             
             # Calculate stats for this contact
             total_amount = sum(txn.get('amount', 0) for txn in contact_txns)
             
             # Calculate recurring contributions (sum of active plan amounts)
             recurring_amount = sum(plan.get('amount', 0) for plan in contact_plans)
-            is_recurring = len(contact_plans) > 0
+            
+            # Determine recurring status from multiple sources
+            is_recurring = len(contact_plans) > 0 or has_givebutter_recurring
+            
+            # Use Givebutter's recurring amount if available and greater
+            if has_givebutter_recurring:
+                givebutter_recurring_amount = givebutter_stats.get('recurring_contributions', 0)
+                recurring_amount = max(recurring_amount, givebutter_recurring_amount)
             
             enriched_contact = {
                 "id": contact_id,
                 "name": f"{contact.get('first_name', '')} {contact.get('last_name', '')}".strip() or "Anonymous",
-                "email": contact.get('email'),
-                "phone": contact.get('phone'),
+                "email": contact.get('primary_email'),
+                "phone": contact.get('primary_phone'),
                 "created_at": contact.get('created_at'),
                 "isRecurring": is_recurring,  # Add this field for frontend
-                "recurringFrequency": contact_plans[0].get('interval', 'monthly') if is_recurring else None,
+                "recurringFrequency": contact_plans[0].get('frequency', 'monthly') if contact_plans else ('monthly' if has_givebutter_recurring else None),
                 "stats": {
-                    "total_contributions": total_amount,
+                    "total_contributions": givebutter_stats.get('total_contributions', total_amount),
                     "recurring_contributions": recurring_amount,
                     "contribution_count": len(contact_txns),
                     "active_plans": len(contact_plans),
